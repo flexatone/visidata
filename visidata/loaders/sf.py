@@ -2,13 +2,16 @@ from functools import partial
 
 from visidata import *
 
+# Commands known to not work
+# `^` Rename current column (and related commands; fails with view_pandas)
+# `&`, inner, outer, diff, extend, merge
+
 class StaticFrameAdapter:
 
     def __init__(self, frame):
         import static_frame as sf
         if not isinstance(frame, sf.Frame):
             vd.fail('%s is not a StaticFrame Frame' % type(frame).__name__)
-
         self.frame = frame
 
     def __len__(self):
@@ -19,7 +22,7 @@ class StaticFrameAdapter:
     def __getitem__(self, k):
         if isinstance(k, slice):
             return StaticFrameAdapter(self.frame.iloc[k])
-        return self.frame.iloc[k]
+        return self.frame.iloc[k] # return a Series
 
     def __getattr__(self, k):
         if 'frame' not in self.__dict__:
@@ -40,7 +43,9 @@ class StaticFrameAdapter:
                 self.frame.iloc[k:],
                 ), index=sf.IndexAutoFactory)
 
-
+    def __bool__(self):
+        # this was added to try to help with `& diff`; does not seem to help
+        return bool(self.frame.size)
 
 class StaticFrameSheet(Sheet):
     '''Sheet sourced from a static_frame.Frame
@@ -52,16 +57,17 @@ class StaticFrameSheet(Sheet):
 
     def dtype_to_type(self, dtype):
         import numpy as np
+
         if dtype == bool:
             return bool
         if dtype.kind == 'U':
             return str
+        if dtype.kind == 'M':
+            return date
         if np.issubdtype(dtype, np.integer):
             return int
         if np.issubdtype(dtype, np.floating):
             return float
-        if np.issubdtype(dtype, np.datetime64):
-            return date
         return anytype
 
     @property
@@ -72,9 +78,11 @@ class StaticFrameSheet(Sheet):
     @frame.setter
     def frame(self, val):
         if isinstance(getattr(self, 'rows', None), StaticFrameAdapter):
+            # If we already have a rows attribute and it is a SFA, then we assume val us a Frame and inject it intot the SFA
             self.rows.frame = val
         else:
             self.rows = StaticFrameAdapter(val)
+        self.name = '' if val.name is None else val.name
 
     def getValue(self, col, row):
         '''Look up column values in the underlying Frame.'''
@@ -86,14 +94,17 @@ class StaticFrameSheet(Sheet):
         column's type as needed.
         '''
         dtype_old = col.sheet.frame.dtypes[col.name]
-        frame = col.sheet.frame.assign.loc[row.name, col.name](val)
-        dtype_new = frame.dtypes[col.name]
+        f = col.sheet.frame.assign.loc[row.name, col.name](val)
+        dtype_new = f.dtypes[col.name]
         if dtype_old != dtype_new:
             vd.warning(f'Type of {val} does not match column {col.name}. Changing type.')
             col.type = self.dtype_to_type(dtype_new)
+        # assign back to frame, convert to StaticFrameAdapter
+        self.rows = StaticFrameAdapter(f)
 
     def reload(self):
         import static_frame as sf
+
         if isinstance(self.source, sf.Frame):
             frame = self.source
         # should paths be supported?
@@ -103,7 +114,7 @@ class StaticFrameSheet(Sheet):
                 readfunc = sf.Frame.from_tsv
             if filetype == 'csv':
                 readfunc = sf.Frame.from_csv
-            elif filetype == 'jsonl':
+            elif filetype == 'json':
                 readfunc = sf.Frame.from_json
             else:
                 vd.error('no supported import for:' + filetype)
@@ -115,8 +126,8 @@ class StaticFrameSheet(Sheet):
             except ValueError as err:
                 vd.fail('error building Frame from source data: %s' % err)
 
-        # reset the index here
-        if frame.index._map: # if it is not an IndexAutoFactory
+        # If the index is not an IndexAutoFactory, try to move it onto the Frame. If this fails it might mean we are trying to unset an auto index post selection
+        if frame.index.depth > 1 or frame.index._map: # if it is not an IndexAutoFactory
             frame = frame.unset_index()
 
         # VisiData assumes string column names
@@ -187,8 +198,12 @@ class StaticFrameSheet(Sheet):
 
     @property
     def selectedRows(self):
+        import static_frame as sf
+
         self._checkSelectedIndex()
-        return StaticFrameAdapter(self.frame.loc[self._selectedMask])
+        # NOTE: we expect to have already moved a real index onto the Frame by the time this is called; this selection will create a new index that is not needed, so replace it with an IndexAutoFactory
+        f = self.frame.loc[self._selectedMask].relabel(sf.IndexAutoFactory)
+        return StaticFrameAdapter(f)
 
     # Vectorized implementation of multi-row selections
     @asyncthread
@@ -259,7 +274,7 @@ class StaticFrameSheet(Sheet):
         '''
         import static_frame as sf
         def items():
-            for col, dtype in zip(self.frame.columns, self.frame.dtypes):
+            for col, dtype in self.frame.dtypes.items():
                 array = np.empty(n, dtype=dtype)
                 array.flags.writeable = False
                 yield col, array
@@ -268,6 +283,7 @@ class StaticFrameSheet(Sheet):
     def addRows(self, rows, index=None, undo=True):
         import static_frame as sf
 
+        # identify empty rows and expand them to column width with None
         rows_exp = []
         for row in rows:
             if len(row) == 0:
@@ -328,11 +344,10 @@ class StaticFrameSheet(Sheet):
         self.deleteBy(self._selectedMask)
 
 
-
 class StaticFrameIndexSheet(IndexSheet):
     rowtype = 'sheets'
     columns = [
-        Column('sheet', getter=lambda col,row: row.source.name),
+        Column('sheet', getter=lambda col, row: row.source.name),
         ColumnAttr('name', width=0),
         ColumnAttr('nRows', type=int),
         ColumnAttr('nCols', type=int),
@@ -341,24 +356,33 @@ class StaticFrameIndexSheet(IndexSheet):
     nKeys = 1
     def iterload(self):
         for sheetname in self.source.keys():
+            # this will combine self.name, sheetname into one name
             yield StaticFrameSheet(self.name, sheetname, source=self.source[sheetname])
-
 
 
 def view_sf(container):
     import static_frame as sf
+
+    name = '' if container.name is None else container.name
+
     # multi-Frame containers
     if isinstance(container, sf.Bus):
-        run(StaticFrameIndexSheet('', source=container))
+        run(StaticFrameIndexSheet(name, source=container))
     elif isinstance(container, sf.Batch):
-        run(StaticFrameIndexSheet('', source=container.to_bus()))
+        run(StaticFrameIndexSheet(name, source=container.to_bus()))
     # Frame-like containers
     elif isinstance(container, sf.Quilt):
-        run(StaticFrameSheet('', source=container.to_frame()))
+        run(StaticFrameSheet(name, source=container.to_frame()))
+    # convertable to a Frame
     elif isinstance(container, sf.Series):
-        run(StaticFrameSheet('', source=container.to_frame()))
+        run(StaticFrameSheet(name, source=container.to_frame()))
+    elif isinstance(container, sf.Index):
+        run(StaticFrameSheet(name, source=container.to_series().to_frame()))
+    elif isinstance(container, sf.IndexHierarchy):
+        run(StaticFrameSheet(name, source=container.to_frame()))
+    # Frame
     else:
-        run(StaticFrameSheet('', source=container))
+        run(StaticFrameSheet(name, source=container))
 
 
 # Override with vectorized implementations
@@ -375,6 +399,7 @@ StaticFrameSheet.addCommand(None, 'unselect-after', 'unselectByIndex(start=curso
 
 
 StaticFrameSheet.addCommand(None, 'random-rows', 'nrows=int(input("random number to select: ", value=nRows)); vs=copy(sheet); vs.name=name+"_sample"; vs.rows=StaticFrameAdapter(sheet.frame.sample(nrows or nRows)); vd.push(vs)', 'open duplicate sheet with a random population subset of N rows'),
+StaticFrameSheet.addCommand(None, 'random-columns', 'ncols=int(input("random number to select: ", value=nCols)); vs=copy(sheet); vs.name=name+"_sample"; vs.source=sheet.frame.sample(columns=(ncols or nCols)); vd.push(vs)', 'open duplicate sheet with a random population subset of N columns'),
 
 # Handle the regex selection family of commands through a single method,
 # since the core logic is shared

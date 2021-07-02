@@ -310,7 +310,7 @@ class PandasSheet(Sheet):
     def deleteBy(self, by):
         '''Delete rows for which func(row) is true.  Returns number of deleted rows.'''
         import pandas as pd
-        oldidx = self.cursorRowIndex
+        oldidx = self.cursorRowIndex # NOTE: not used
         nRows = self.nRows
         vd.addUndo(setattr, self, 'df', self.df.copy())
         self.df = self.df[~by]

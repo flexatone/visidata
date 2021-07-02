@@ -96,6 +96,7 @@ class StaticFrameSheet(Sheet):
         import static_frame as sf
         if isinstance(self.source, sf.Frame):
             frame = self.source
+        # should paths be supported?
         elif isinstance(self.source, Path):
             filetype = getattr(self, 'filetype', self.source.ext)
             if filetype == 'tsv':
@@ -220,9 +221,10 @@ class StaticFrameSheet(Sheet):
         self._selectedMask = self._selectedMask.assign.iloc[start:end](
                 ~self._selectedMask.iloc[start:end])
 
-    def _selectByILoc(self, mask, selected=True):
-        self._checkSelectedIndex()
-        self._selectedMask = self._selectedMask.assign.iloc[mask](selected)
+    # not used
+    # def _selectByILoc(self, mask, selected=True):
+    #     self._checkSelectedIndex()
+    #     self._selectedMask = self._selectedMask.assign.iloc[mask](selected)
 
     @asyncthread
     def selectByRegex(self, regex, columns, unselect=False):
@@ -311,7 +313,7 @@ class StaticFrameSheet(Sheet):
     def deleteBy(self, by):
         '''Delete rows for which func(row) is true.  Returns number of deleted rows.'''
         import static_frame as sf
-        oldidx = self.cursorRowIndex
+        # oldidx = self.cursorRowIndex # NOTE: not used
         nRows = self.nRows
         vd.addUndo(setattr, self, 'frame', self.frame)
 
